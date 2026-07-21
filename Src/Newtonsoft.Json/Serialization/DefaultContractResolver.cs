@@ -1119,20 +1119,28 @@ namespace Newtonsoft.Json.Serialization
         /// Creates a <see cref="JsonISerializableContract"/> for the given type.
         /// </summary>
         /// <param name="objectType">Type of the object.</param>
+        /// <param name="surrogate"><see cref="ISerializationSurrogate"/> used to get and set object data.</param>
         /// <returns>A <see cref="JsonISerializableContract"/> for the given type.</returns>
-        protected virtual JsonISerializableContract CreateISerializableContract(Type objectType)
+        protected virtual JsonISerializableContract CreateISerializableContract(Type objectType, ISerializationSurrogate? surrogate)
         {
             JsonISerializableContract contract = new JsonISerializableContract(objectType);
             InitializeContract(contract);
 
-            if (contract.IsInstantiable)
+            IgnoreIsSpecifiedMembers = true;
+            contract.Properties.AddRange(CreateProperties(contract.NonNullableUnderlyingType, MemberSerialization.Fields));
+
+            if (surrogate != null)
+            {
+                contract.Surrogate = surrogate;
+            }
+            else if (contract.IsInstantiable)
             {
                 ConstructorInfo? constructorInfo = contract.NonNullableUnderlyingType.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, new[] {typeof(SerializationInfo), typeof(StreamingContext)}, null);
                 if (constructorInfo != null)
                 {
-                    ObjectConstructor<object> creator = JsonTypeReflector.ReflectionDelegateFactory.CreateParameterizedConstructor(constructorInfo);
+                    //ObjectConstructorEx<object> creator = JsonTypeReflector.ReflectionDelegateFactory.CreateParameterizedConstructorEx(constructorInfo);
 
-                    contract.ISerializableCreator = creator;
+                    contract.ISerializableCreator = constructorInfo;
                 }
             }
 
@@ -1236,7 +1244,7 @@ namespace Newtonsoft.Json.Serialization
 #if HAVE_BINARY_SERIALIZATION
             if (!IgnoreSerializableInterface && typeof(ISerializable).IsAssignableFrom(t) && JsonTypeReflector.IsSerializable(t))
             {
-                return CreateISerializableContract(objectType);
+                return CreateISerializableContract(objectType, null);
             }
 #endif
 

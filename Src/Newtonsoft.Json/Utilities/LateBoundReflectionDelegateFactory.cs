@@ -52,15 +52,16 @@ namespace Newtonsoft.Json.Utilities
 
             return a => method.Invoke(null, a)!;
         }
+        public override ObjectConstructorEx<object> CreateParameterizedConstructorEx(MethodBase method)
+        {
+            ValidationUtils.ArgumentNotNull(method, nameof(method));
+
+            return (o, a) => method.Invoke(o, a)!;
+        }
 
         public override MethodCall<T, object?> CreateMethodCall<T>(MethodBase method)
         {
             ValidationUtils.ArgumentNotNull(method, nameof(method));
-
-            if (method is ConstructorInfo c)
-            {
-                return (o, a) => c.Invoke(a);
-            }
 
             return (o, a) => method.Invoke(o, a);
         }

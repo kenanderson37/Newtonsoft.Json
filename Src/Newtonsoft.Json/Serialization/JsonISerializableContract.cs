@@ -25,6 +25,7 @@
 
 #if HAVE_BINARY_SERIALIZATION
 using System;
+using System.Reflection;
 using System.Runtime.Serialization;
 
 namespace Newtonsoft.Json.Serialization
@@ -32,13 +33,19 @@ namespace Newtonsoft.Json.Serialization
     /// <summary>
     /// Contract details for a <see cref="Type"/> used by the <see cref="JsonSerializer"/>.
     /// </summary>
-    public class JsonISerializableContract : JsonContainerContract
+    public class JsonISerializableContract : JsonObjectContract
     {
         /// <summary>
         /// Gets or sets the <see cref="ISerializable"/> object constructor.
         /// </summary>
         /// <value>The <see cref="ISerializable"/> object constructor.</value>
-        public ObjectConstructor<object>? ISerializableCreator { get; set; }
+        public ConstructorInfo ISerializableCreator { get; set; } = null!;
+
+        /// <summary>
+        /// Gets or sets the <see cref="Surrogate"/> used for serializing/deserializing.
+        /// </summary>
+        /// <value>The <see cref="Surrogate"/> object.</value>
+        public ISerializationSurrogate Surrogate { get; set; } = null!;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="JsonISerializableContract"/> class.

@@ -59,6 +59,16 @@ namespace Newtonsoft.Json.Utilities
             return (ObjectConstructor<object>)dynamicMethod.CreateDelegate(typeof(ObjectConstructor<object>));
         }
 
+        public override ObjectConstructorEx<object> CreateParameterizedConstructorEx(MethodBase method)
+        {
+            DynamicMethod dynamicMethod = CreateDynamicMethod(method.ToString()!, typeof(object), new[] { typeof(object), typeof(object[]) }, method.DeclaringType!);
+            ILGenerator generator = dynamicMethod.GetILGenerator();
+
+            GenerateCreateMethodCallIL(method, generator, 1);
+
+            return (ObjectConstructorEx<object>)dynamicMethod.CreateDelegate(typeof(ObjectConstructorEx<object>));
+        }
+
         public override MethodCall<T, object?> CreateMethodCall<T>(MethodBase method)
         {
             DynamicMethod dynamicMethod = CreateDynamicMethod(method.ToString()!, typeof(object), new[] { typeof(object), typeof(object[]) }, method.DeclaringType!);

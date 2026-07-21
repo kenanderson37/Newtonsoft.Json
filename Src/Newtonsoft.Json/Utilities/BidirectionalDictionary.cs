@@ -38,6 +38,8 @@ namespace Newtonsoft.Json.Utilities
         private readonly IDictionary<TSecond, TFirst> _secondToFirst;
         private readonly string _duplicateFirstErrorMessage;
         private readonly string _duplicateSecondErrorMessage;
+        private readonly string _unknownFirstErrorMessage;
+        private readonly string _unknownSecondErrorMessage;
 
         public BidirectionalDictionary()
             : this(EqualityComparer<TFirst>.Default, EqualityComparer<TSecond>.Default)
@@ -60,6 +62,8 @@ namespace Newtonsoft.Json.Utilities
             _secondToFirst = new Dictionary<TSecond, TFirst>(secondEqualityComparer);
             _duplicateFirstErrorMessage = duplicateFirstErrorMessage;
             _duplicateSecondErrorMessage = duplicateSecondErrorMessage;
+            _unknownFirstErrorMessage = "Cannot find item to update '{0}'.";
+            _unknownSecondErrorMessage = "Cannot find item to update '{0}'.";
         }
 
         public void Set(TFirst first, TSecond second)
@@ -81,6 +85,32 @@ namespace Newtonsoft.Json.Utilities
             }
 
             _firstToSecond.Add(first, second);
+            _secondToFirst.Add(second, first);
+        }
+
+        public void UpdateFirst(TFirst first, TSecond second)
+        {
+            TFirst? existingFirst;
+            if (!_secondToFirst.TryGetValue(second, out existingFirst))
+            {
+                throw new ArgumentException(_unknownSecondErrorMessage.FormatWith(CultureInfo.InvariantCulture, second));
+            }
+
+            _firstToSecond.Remove(existingFirst);
+            _firstToSecond.Add(first, second);
+            _secondToFirst[second] = first;
+        }
+
+        public void UpdateSecond(TFirst first, TSecond second)
+        {
+            TSecond? existingSecond;
+            if (!_firstToSecond.TryGetValue(first, out existingSecond))
+            {
+                throw new ArgumentException(_unknownFirstErrorMessage.FormatWith(CultureInfo.InvariantCulture, second));
+            }
+
+            _secondToFirst.Remove(existingSecond);
+            _firstToSecond[first] = second;
             _secondToFirst.Add(second, first);
         }
 

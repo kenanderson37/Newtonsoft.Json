@@ -74,6 +74,10 @@ namespace Newtonsoft.Json.Serialization
         {
             GetMappings(context).Set(reference, value);
         }
+        public void UpdateReference(object context, string reference, object value)
+        {
+            GetMappings(context).UpdateSecond(reference, value);
+        }
 
         public bool IsReferenced(object context, object value)
         {

@@ -32,7 +32,7 @@ using System.Security;
 // General Information about an assembly is controlled through the following 
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-#if NET20
+/*#if NET20
 [assembly: AllowPartiallyTrustedCallers]
 #elif NET35
 [assembly: AllowPartiallyTrustedCallers]
@@ -40,7 +40,7 @@ using System.Security;
 [assembly: AllowPartiallyTrustedCallers]
 #else
 [assembly: AllowPartiallyTrustedCallers]
-#endif
+#endif*/
 
 #if !SIGNED
 

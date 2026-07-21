@@ -470,7 +470,11 @@ namespace Newtonsoft.Json.Serialization
 
             if (HasNoDefinedType(contract))
             {
-                return CreateJObject(reader);
+                JToken jObject = CreateJObject(reader);
+                if (contract != null && contract.UnderlyingType == typeof(object) && !jObject.HasValues)
+                    return new object();
+                else
+                    return jObject;
             }
 
             MiscellaneousUtils.Assert(resolvedObjectType != null);
@@ -794,7 +798,21 @@ namespace Newtonsoft.Json.Serialization
                 }
                 catch (Exception ex)
                 {
-                    throw JsonSerializationException.Create(reader, "Error resolving type specified in JSON '{0}'.".FormatWith(CultureInfo.InvariantCulture, qualifiedTypeName), ex);
+                    if (Serializer._serializationBinder != DefaultSerializationBinder.Instance)
+                    {
+                        try
+                        {
+                            specifiedType = DefaultSerializationBinder.Instance.BindToType(typeNameKey.Value1, typeNameKey.Value2);
+                        }
+                        catch (Exception ex2)
+                        {
+                            throw JsonSerializationException.Create(reader, "Error resolving type specified in JSON '{0}'.".FormatWith(CultureInfo.InvariantCulture, qualifiedTypeName), ex2);
+                        }
+                    }
+                    else
+                    {
+                        throw JsonSerializationException.Create(reader, "Error resolving type specified in JSON '{0}'.".FormatWith(CultureInfo.InvariantCulture, qualifiedTypeName), ex);
+                    }
                 }
 
                 if (specifiedType == null)
@@ -810,6 +828,9 @@ namespace Newtonsoft.Json.Serialization
                 if (objectType != null
 #if HAVE_DYNAMIC
                     && objectType != typeof(IDynamicMetaObjectProvider)
+#endif
+#if HAVE_BINARY_SERIALIZATION
+                    && !typeof(IObjectReference).IsAssignableFrom(specifiedType)
 #endif
                     && !objectType.IsAssignableFrom(specifiedType))
                 {
@@ -853,33 +874,57 @@ namespace Newtonsoft.Json.Serialization
             MiscellaneousUtils.Assert(contract != null);
 
             JsonArrayContract arrayContract = EnsureArrayContract(reader, objectType, contract);
+            JsonConverter? arrayConverter = null; // arrayContract.ItemConverter ?? GetConverter(arrayContract, null, null, null);
 
-            if (existingValue == null)
+            if (arrayConverter != null && arrayConverter.CanRead)
             {
-                IList list = CreateNewList(reader, arrayContract, out bool createdFromNonDefaultCreator);
-
-                if (createdFromNonDefaultCreator)
+                value = DeserializeConvertable(arrayConverter, reader, objectType!, null);
+            }
+            else if (existingValue == null)
+            {
+                IList list;
+                bool createdFromNonDefaultCreator;
+                if (arrayContract.IsReadOnlyOrFixedSize)
                 {
-                    if (id != null)
+                    if (!(reader is JTokenReader tokenReader))
                     {
-                        throw JsonSerializationException.Create(reader, "Cannot preserve reference to array or readonly list, or list created from a non-default constructor: {0}.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
+                        JToken t = JToken.ReadFrom(reader);
+                        tokenReader = (JTokenReader)t.CreateReader();
+                        tokenReader.Culture = reader.Culture;
+                        tokenReader.DateFormatString = reader.DateFormatString;
+                        tokenReader.DateParseHandling = reader.DateParseHandling;
+                        tokenReader.DateTimeZoneHandling = reader.DateTimeZoneHandling;
+                        tokenReader.FloatParseHandling = reader.FloatParseHandling;
+                        tokenReader.SupportMultipleContent = reader.SupportMultipleContent;
+
+                        // start
+                        tokenReader.ReadAndAssert();
+
+                        reader = tokenReader;
                     }
 
-                    if (contract.OnSerializingCallbacks.Count > 0)
+                    JToken token = tokenReader.CurrentToken!;
+                    if (!arrayContract.IsMultidimensionalArray)
                     {
-                        throw JsonSerializationException.Create(reader, "Cannot call OnSerializing on an array or readonly list, or list created from a non-default constructor: {0}.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
+                        int count = (token as JArray)?.Count ?? 0;
+                        list = CreateNewList(reader, arrayContract, out createdFromNonDefaultCreator, count);
                     }
-
-                    if (contract.OnErrorCallbacks.Count > 0)
+                    else
                     {
-                        throw JsonSerializationException.Create(reader, "Cannot call OnError on an array or readonly list, or list created from a non-default constructor: {0}.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
-                    }
-
-                    if (!arrayContract.HasParameterizedCreatorInternal && !arrayContract.IsArray)
-                    {
-                        throw JsonSerializationException.Create(reader, "Cannot deserialize readonly or fixed size list: {0}.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
+                        List<int> indicies = new List<int>();
+                        for (int i = 0; i < arrayContract.UnderlyingType.GetArrayRank(); i++)
+                        {
+                            indicies.Add((token as JArray)?.Count ?? 0);
+                            token = token?.First!;
+                        }
+                        list = CreateNewList(reader, arrayContract, out createdFromNonDefaultCreator, indicies.ToArray());
                     }
                 }
+                else
+                {
+                    list = CreateNewList(reader, arrayContract, out createdFromNonDefaultCreator);
+                }
+                
 
                 if (!arrayContract.IsMultidimensionalArray)
                 {
@@ -1215,7 +1260,7 @@ namespace Newtonsoft.Json.Serialization
             return true;
         }
 
-        private IList CreateNewList(JsonReader reader, JsonArrayContract contract, out bool createdFromNonDefaultCreator)
+        private IList CreateNewList(JsonReader reader, JsonArrayContract contract, out bool createdFromNonDefaultCreator, params int[] size)
         {
             // some types like non-generic IEnumerable can be serialized but not deserialized
             if (!contract.CanDeserialize)
@@ -1245,15 +1290,23 @@ namespace Newtonsoft.Json.Serialization
             }
             else if (contract.IsReadOnlyOrFixedSize)
             {
-                createdFromNonDefaultCreator = true;
-                IList list = contract.CreateTemporaryCollection();
-
-                if (contract.ShouldCreateWrapper)
+                if (contract.IsArray)
                 {
-                    list = contract.CreateWrapper(list);
+                    createdFromNonDefaultCreator = false;
+                    return Array.CreateInstance(contract.CollectionItemType!, size ?? new int[] { 0 });
                 }
+                else
+                {
+                    IList list = contract.CreateTemporaryCollection();
 
-                return list;
+                    if (contract.ShouldCreateWrapper)
+                    {
+                        list = contract.CreateWrapper(list);
+                    }
+
+                    createdFromNonDefaultCreator = true;
+                    return list;
+                }
             }
             else if (contract.DefaultCreator != null && (!contract.DefaultCreatorNonPublic || Serializer._constructorHandling == ConstructorHandling.AllowNonPublicDefaultConstructor))
             {
@@ -1349,6 +1402,16 @@ namespace Newtonsoft.Json.Serialization
             }
 
             contract.InvokeOnDeserialized(value, Serializer._context);
+        }
+
+        private void OnDeserializationCallback(JsonContract contract, IDeserializationCallback value)
+        {
+            if (TraceWriter != null && TraceWriter.LevelFilter >= TraceLevel.Info)
+            {
+                TraceWriter.Trace(TraceLevel.Info, JsonPosition.FormatMessage(null, string.Empty, "Running OnDeserializingCallback {0}".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType)), null);
+            }
+
+            value.OnDeserialization(null);
         }
 
         private object PopulateDictionary(IDictionary dictionary, JsonReader reader, JsonDictionaryContract contract, JsonProperty? containerProperty, string? id)
@@ -1489,16 +1552,20 @@ namespace Newtonsoft.Json.Serialization
             JsonConverter? collectionItemConverter = GetConverter(collectionItemContract, null, contract, containerProperty);
 
             int? previousErrorIndex = null;
+
+            bool finished = false;
             Stack<IList> listStack = new Stack<IList>();
             listStack.Push(list);
             IList currentList = list;
 
-            bool finished = false;
+            int[] indices = new int[rank];
+            int currentRank = 1;
+
             do
             {
                 int initialDepth = reader.Depth;
 
-                if (listStack.Count == rank)
+                if (currentRank == rank)
                 {
                     try
                     {
@@ -1507,9 +1574,15 @@ namespace Newtonsoft.Json.Serialization
                             switch (reader.TokenType)
                             {
                                 case JsonToken.EndArray:
-                                    listStack.Pop();
-                                    currentList = listStack.Peek();
+                                    if (!currentList.IsFixedSize)
+                                    {
+                                        listStack.Pop();
+                                        currentList = listStack.Peek();
+                                    }
                                     previousErrorIndex = null;
+                                    currentRank--;
+                                    indices[currentRank] = 0;
+                                    indices[currentRank - 1]++;
                                     break;
                                 case JsonToken.Comment:
                                     break;
@@ -1524,8 +1597,29 @@ namespace Newtonsoft.Json.Serialization
                                     {
                                         value = CreateValueInternal(reader, contract.CollectionItemType, collectionItemContract, null, contract, containerProperty, null);
                                     }
-
-                                    currentList.Add(value);
+                                    if (!currentList.IsFixedSize)
+                                    {
+                                        if (indices[currentRank] < currentList.Count)
+                                        {
+                                            currentList[indices[currentRank]] = value;
+                                        }
+                                        else
+                                        {
+                                            currentList.Add(value);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (currentList is Array array)
+                                        {
+                                            array.SetValue(value, indices);
+                                        }
+                                        else
+                                        {
+                                            throw JsonSerializationException.Create(reader, "Cannot write to a fixed array that isn't preallocated.");
+                                        }
+                                    }
+                                    indices[currentRank - 1]++;
                                     break;
                             }
                         }
@@ -1566,21 +1660,33 @@ namespace Newtonsoft.Json.Serialization
                         switch (reader.TokenType)
                         {
                             case JsonToken.StartArray:
-                                IList newList = new List<object>();
-                                currentList.Add(newList);
-                                listStack.Push(newList);
-                                currentList = newList;
+                                if (!currentList.IsFixedSize)
+                                {
+                                    IList newList = new List<object>();
+                                    currentList.Add(newList);
+                                    listStack.Push(newList);
+                                    currentList = newList;
+                                }
+                                currentRank++;
                                 break;
                             case JsonToken.EndArray:
-                                listStack.Pop();
-
-                                if (listStack.Count > 0)
+                                currentRank--;
+                                indices[currentRank] = 0;
+                                if (currentRank == 0)
                                 {
-                                    currentList = listStack.Peek();
+                                    finished = true;
                                 }
                                 else
                                 {
-                                    finished = true;
+                                    indices[currentRank - 1]++;
+                                }
+                                if (!currentList.IsFixedSize)
+                                {
+                                    listStack.Pop();
+                                    if (currentRank > 0)
+                                    {
+                                        currentList = listStack.Peek();
+                                    }
                                 }
                                 break;
                             case JsonToken.Comment:
@@ -1634,13 +1740,6 @@ namespace Newtonsoft.Json.Serialization
                 AddReference(reader, id, underlyingList);
             }
 
-            // can't populate an existing array
-            if (list.IsFixedSize)
-            {
-                reader.Skip();
-                return underlyingList;
-            }
-
             OnDeserializing(reader, contract, underlyingList);
 
             int initialDepth = reader.Depth;
@@ -1654,6 +1753,7 @@ namespace Newtonsoft.Json.Serialization
 
             int? previousErrorIndex = null;
 
+            int i = 0;
             bool finished = false;
             do
             {
@@ -1680,7 +1780,16 @@ namespace Newtonsoft.Json.Serialization
                                     value = CreateValueInternal(reader, contract.CollectionItemType, contract.ItemContract, null, contract, containerProperty, null);
                                 }
 
-                                list.Add(value);
+                                if (i < list.Count)
+                                {
+                                    list[i] = value;
+                                }
+                                else
+                                {
+                                    list.Add(value);
+                                }
+                                i++;
+
                                 break;
                         }
                     }
@@ -1726,74 +1835,160 @@ namespace Newtonsoft.Json.Serialization
         }
 
 #if HAVE_BINARY_SERIALIZATION
+
+        internal delegate void DeserializationEventHandler(object sender);
+
+        private DeserializationEventHandler? onDeserializationHandler;
+
+        private int serializeLevel = 0;
         private object CreateISerializable(JsonReader reader, JsonISerializableContract contract, JsonProperty? member, string? id)
         {
-            Type objectType = contract.UnderlyingType;
-
-            if (!JsonTypeReflector.FullyTrusted)
+            if (serializeLevel == 0)
             {
-                string message = @"Type '{0}' implements ISerializable but cannot be deserialized using the ISerializable interface because the current application is not fully trusted and ISerializable can expose secure data." + Environment.NewLine +
-                                 @"To fix this error either change the environment to be fully trusted, change the application to not deserialize the type, add JsonObjectAttribute to the type or change the JsonSerializer setting ContractResolver to use a new DefaultContractResolver with IgnoreSerializableInterface set to true." + Environment.NewLine;
-                message = message.FormatWith(CultureInfo.InvariantCulture, objectType);
-
-                throw JsonSerializationException.Create(reader, message);
+                onDeserializationHandler = null;
             }
 
-            if (TraceWriter != null && TraceWriter.LevelFilter >= TraceLevel.Info)
+            object? createdObject = null;
+            try
             {
-                TraceWriter.Trace(TraceLevel.Info, JsonPosition.FormatMessage(reader as IJsonLineInfo, reader.Path, "Deserializing {0} using ISerializable constructor.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType)), null);
-            }
+                serializeLevel++;
+                Type objectType = contract.UnderlyingType;
 
-            SerializationInfo serializationInfo = new SerializationInfo(contract.UnderlyingType, new JsonFormatterConverter(this, contract, member));
-
-            bool finished = false;
-            do
-            {
-                switch (reader.TokenType)
+                if (!JsonTypeReflector.FullyTrusted)
                 {
-                    case JsonToken.PropertyName:
-                        string memberName = reader.Value!.ToString()!;
-                        if (!reader.Read())
-                        {
-                            throw JsonSerializationException.Create(reader, "Unexpected end when setting {0}'s value.".FormatWith(CultureInfo.InvariantCulture, memberName));
-                        }
-                        serializationInfo.AddValue(memberName, JToken.ReadFrom(reader));
-                        break;
-                    case JsonToken.Comment:
-                        break;
-                    case JsonToken.EndObject:
-                        finished = true;
-                        break;
-                    default:
-                        throw JsonSerializationException.Create(reader, "Unexpected token when deserializing object: " + reader.TokenType);
+                    string message = @"Type '{0}' implements ISerializable but cannot be deserialized using the ISerializable interface because the current application is not fully trusted and ISerializable can expose secure data." + Environment.NewLine +
+                                     @"To fix this error either change the environment to be fully trusted, change the application to not deserialize the type, add JsonObjectAttribute to the type or change the JsonSerializer setting ContractResolver to use a new DefaultContractResolver with IgnoreSerializableInterface set to true." + Environment.NewLine;
+                    message = message.FormatWith(CultureInfo.InvariantCulture, objectType);
+
+                    throw JsonSerializationException.Create(reader, message);
                 }
-            } while (!finished && reader.Read());
 
-            if (!finished)
+                if (!contract.IsInstantiable)
+                {
+                    throw JsonSerializationException.Create(reader, "Could not create an instance of type {0}. Type is an interface or abstract class and cannot be instantiated.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
+                }
+
+                if (contract.ISerializableCreator == null && contract.Surrogate == null)
+                {
+                    throw JsonSerializationException.Create(reader, "ISerializable type '{0}' does not have a valid constructor. To correctly implement ISerializable a constructor that takes SerializationInfo and StreamingContext parameters should be present.".FormatWith(CultureInfo.InvariantCulture, objectType));
+                }
+
+                if (TraceWriter != null && TraceWriter.LevelFilter >= TraceLevel.Info)
+                {
+                    TraceWriter.Trace(TraceLevel.Info, JsonPosition.FormatMessage(reader as IJsonLineInfo, reader.Path, "Deserializing {0} using ISerializable constructor.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType)), null);
+                }
+
+                createdObject = FormatterServices.GetUninitializedObject(objectType);
+
+                if (id != null)
+                {
+                    AddReference(reader, id, createdObject);
+                }
+
+                OnDeserializing(reader, contract, createdObject);
+
+                SerializationInfo serializationInfo = new SerializationInfo(contract.UnderlyingType, new ISerializeFormatterConverter());
+                List<JsonProperty> alreadySetProperties = new List<JsonProperty>();
+                int initialDepth = reader.Depth;
+
+                bool finished = false;
+                do
+                {
+                    switch (reader.TokenType)
+                    {
+                        case JsonToken.PropertyName:
+                            string memberName = reader.Value!.ToString()!;
+                            if (!reader.Read())
+                            {
+                                throw JsonSerializationException.Create(reader, "Unexpected end when setting {0}'s value.".FormatWith(CultureInfo.InvariantCulture, memberName));
+                            }
+
+                            object? value;
+                            JsonProperty? prop = contract.Properties.GetClosestMatchProperty(memberName);
+                            if (prop != null && !prop.Ignored)
+                            {
+                                JsonContract? propContract = GetContractSafe(prop.PropertyType);
+                                value = CreateValueInternal(reader, prop?.PropertyType, propContract, prop, null, null, null);
+                                alreadySetProperties.Add(prop!);
+                            }
+                            else
+                            {
+                                value = CreateValueInternal(reader, null, null, null, null, null, null);
+                            }
+
+                            serializationInfo.AddValue(memberName, value);
+
+                            break;
+                        case JsonToken.Comment:
+                            break;
+                        case JsonToken.EndObject:
+                            finished = true;
+                            break;
+                        default:
+                            throw JsonSerializationException.Create(reader, "Unexpected token when deserializing object: " + reader.TokenType);
+                    }
+                } while (!finished && reader.Read());
+
+                if (!finished)
+                {
+                    ThrowUnexpectedEndException(reader, contract, serializationInfo, "Unexpected end when deserializing object.");
+                }
+
+                foreach (var property in contract.Properties.Except(alreadySetProperties))
+                {
+                    if (!property.Ignored && HasFlag(property.DefaultValueHandling.GetValueOrDefault(Serializer._defaultValueHandling), DefaultValueHandling.Populate))
+                    {
+                        serializationInfo.AddValue(property.PropertyName, property.GetResolvedDefaultValue());
+                    }
+                }
+
+                try
+                {
+                    if (contract.Surrogate != null)
+                    {
+                        contract.Surrogate.SetObjectData(createdObject, serializationInfo, Serializer._context, null);
+                    }
+                    else if (contract.ISerializableCreator != null)
+                    {
+                        contract.ISerializableCreator.Invoke(createdObject, new object[] { serializationInfo, Serializer._context });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (IsErrorHandled(createdObject, contract, null, reader as IJsonLineInfo, reader.Path, ex))
+                    {
+                        HandleError(reader, true, initialDepth);
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+
+                if (createdObject is IObjectReference createdReference)
+                {
+                    createdObject = createdReference.GetRealObject(Serializer._context);
+                    if (id != null)
+                    {
+                        Serializer.GetReferenceResolver().UpdateReference(this, id, createdObject);
+                    }
+                }
+
+                if (createdObject is IDeserializationCallback)
+                {
+                    DeserializationEventHandler d = ((IDeserializationCallback)createdObject).OnDeserialization;
+                    onDeserializationHandler = (DeserializationEventHandler)Delegate.Combine(onDeserializationHandler, d);
+                }
+            }
+            finally
             {
-                ThrowUnexpectedEndException(reader, contract, serializationInfo, "Unexpected end when deserializing object.");
+                serializeLevel--;
             }
 
-            if (!contract.IsInstantiable)
+            if (serializeLevel == 0)
             {
-                throw JsonSerializationException.Create(reader, "Could not create an instance of type {0}. Type is an interface or abstract class and cannot be instantiated.".FormatWith(CultureInfo.InvariantCulture, contract.UnderlyingType));
+                onDeserializationHandler?.Invoke(new object());
             }
-
-            if (contract.ISerializableCreator == null)
-            {
-                throw JsonSerializationException.Create(reader, "ISerializable type '{0}' does not have a valid constructor. To correctly implement ISerializable a constructor that takes SerializationInfo and StreamingContext parameters should be present.".FormatWith(CultureInfo.InvariantCulture, objectType));
-            }
-
-            object createdObject = contract.ISerializableCreator(serializationInfo, Serializer._context);
-
-            if (id != null)
-            {
-                AddReference(reader, id, createdObject);
-            }
-
-            // these are together because OnDeserializing takes an object but for an ISerializable the object is fully created in the constructor
-            OnDeserializing(reader, contract, createdObject);
-            OnDeserialized(reader, contract, createdObject);
 
             return createdObject;
         }

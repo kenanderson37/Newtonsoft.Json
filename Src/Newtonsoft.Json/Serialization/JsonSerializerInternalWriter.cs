@@ -147,6 +147,17 @@ namespace Newtonsoft.Json.Serialization
                     return;
                 }
             }
+            if (member == null && contract.IsEnum)
+            {
+                writer.WriteStartObject();
+                WriteTypeProperty(writer, contract.CreatedType);
+                writer.WritePropertyName(JsonTypeReflector.ValuePropertyName, false);
+
+                JsonWriter.WriteValue(writer, contract.TypeCode, value);
+
+                writer.WriteEndObject();
+                return;
+            }
 
             JsonWriter.WriteValue(writer, contract.TypeCode, value);
         }
@@ -208,7 +219,7 @@ namespace Newtonsoft.Json.Serialization
 #endif
 #if HAVE_BINARY_SERIALIZATION
                 case JsonContractType.Serializable:
-                    SerializeISerializable(writer, (ISerializable)value, (JsonISerializableContract)valueContract, member, containerContract, containerProperty);
+                    SerializeISerializable(writer, value, (JsonISerializableContract)valueContract, member, containerContract, containerProperty);
                     break;
 #endif
                 case JsonContractType.Linq:
@@ -866,7 +877,7 @@ namespace Newtonsoft.Json.Serialization
 #if HAVE_SECURITY_SAFE_CRITICAL_ATTRIBUTE
         [SecuritySafeCritical]
 #endif
-        private void SerializeISerializable(JsonWriter writer, ISerializable value, JsonISerializableContract contract, JsonProperty? member, JsonContainerContract? collectionContract, JsonProperty? containerProperty)
+        private void SerializeISerializable(JsonWriter writer, object value, JsonISerializableContract contract, JsonProperty? member, JsonContainerContract? collectionContract, JsonProperty? containerProperty)
         {
             if (!JsonTypeReflector.FullyTrusted)
             {
@@ -880,24 +891,74 @@ namespace Newtonsoft.Json.Serialization
             OnSerializing(writer, contract, value);
             _serializeStack.Add(value);
 
-            WriteObjectStart(writer, value, contract, member, collectionContract, containerProperty);
-
             SerializationInfo serializationInfo = new SerializationInfo(contract.UnderlyingType, new FormatterConverter());
-            value.GetObjectData(serializationInfo, Serializer._context);
+            try
+            {
+                if (contract.Surrogate != null)
+                {
+                    contract.Surrogate.GetObjectData(value, serializationInfo, Serializer._context);
+                    try
+                    {
+                        Type referenceType = Serializer.SerializationBinder.BindToType(serializationInfo.AssemblyName, serializationInfo.FullTypeName);
+                        if (contract.NonNullableUnderlyingType != referenceType)
+                        {
+                            contract = Serializer._contractResolver.ResolveContract(referenceType) as JsonISerializableContract ?? contract;
+                        }
+                    }
+                    catch { }
+                }
+                else if (value is ISerializable)
+                {
+                    ((ISerializable)value).GetObjectData(serializationInfo, Serializer._context);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (IsErrorHandled(value, contract, member, null, writer.ContainerPath, ex))
+                {
+                    HandleError(writer, writer.Top);
+                }
+                else
+                {
+                    throw;
+                }
+            }
+
+            WriteObjectStart(writer, value, contract, member, collectionContract, containerProperty);
 
             foreach (SerializationEntry serializationEntry in serializationInfo)
             {
-                JsonContract? valueContract = GetContractSafe(serializationEntry.Value);
+                JsonProperty? memberProperty = contract.Properties.GetProperty(serializationEntry.Name, StringComparison.Ordinal);
 
-                if (ShouldWriteReference(serializationEntry.Value, null, valueContract, contract, member))
+                if (memberProperty != null)
+                {
+                    if (!memberProperty.Ignored)
+                    {
+                        if (!CalculatePropertyValues(writer, value, contract, member, memberProperty, out JsonContract? memberContract, out object? memberValue))
+                        {
+                            continue;
+                        }
+                    }
+                    else // special condition to allow ignored properties forcibly added to serializationInfo
+                    {
+                        if (memberProperty.PropertyContract == null)
+                        {
+                            memberProperty.PropertyContract = Serializer._contractResolver.ResolveContract(memberProperty.PropertyType!);
+                        }
+                    }
+                }
+
+                JsonContract? valueContract = Serializer._contractResolver.ResolveContract(serializationEntry.ObjectType);
+
+                if (ShouldWriteReference(serializationEntry.Value, memberProperty, valueContract, contract, member))
                 {
                     writer.WritePropertyName(serializationEntry.Name);
                     WriteReference(writer, serializationEntry.Value!);
                 }
-                else if (CheckForCircularReference(writer, serializationEntry.Value, null, valueContract, contract, member))
+                else if (CheckForCircularReference(writer, serializationEntry.Value, memberProperty, valueContract, contract, member))
                 {
                     writer.WritePropertyName(serializationEntry.Name);
-                    SerializeValue(writer, serializationEntry.Value, valueContract, null, contract, member);
+                    SerializeValue(writer, serializationEntry.Value, valueContract, memberProperty, contract, member);
                 }
             }
 
@@ -1075,8 +1136,11 @@ namespace Newtonsoft.Json.Serialization
 
             int initialDepth = writer.Top;
 
+            // Attempt to sort for round-trip serialization
+            var sortedValues = new SortedList(values);
+
             // Manual use of IDictionaryEnumerator instead of foreach to avoid DictionaryEntry box allocations.
-            IDictionaryEnumerator e = values.GetEnumerator();
+            IDictionaryEnumerator e = sortedValues.GetEnumerator();
             try
             {
                 while (e.MoveNext())

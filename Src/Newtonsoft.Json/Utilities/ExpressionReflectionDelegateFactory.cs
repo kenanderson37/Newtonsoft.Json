@@ -56,6 +56,22 @@ namespace Newtonsoft.Json.Utilities
             ObjectConstructor<object> compiled = (ObjectConstructor<object>)lambdaExpression.Compile();
             return compiled;
         }
+        public override ObjectConstructorEx<object> CreateParameterizedConstructorEx(MethodBase method)
+        {
+            ValidationUtils.ArgumentNotNull(method, nameof(method));
+
+            Type type = typeof(object);
+
+            ParameterExpression targetParameterExpression = Expression.Parameter(type, "target");
+            ParameterExpression argsParameterExpression = Expression.Parameter(typeof(object[]), "args");
+
+            Expression callExpression = BuildMethodCall(method, type, targetParameterExpression, argsParameterExpression);
+
+            LambdaExpression lambdaExpression = Expression.Lambda(typeof(ObjectConstructorEx<object>), callExpression, targetParameterExpression, argsParameterExpression);
+
+            ObjectConstructorEx<object> compiled = (ObjectConstructorEx<object>)lambdaExpression.Compile();
+            return compiled;
+        }
 
         public override MethodCall<T, object?> CreateMethodCall<T>(MethodBase method)
         {
